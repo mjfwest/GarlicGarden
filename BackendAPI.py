@@ -1,5 +1,6 @@
 ﻿import flask
 from flask import Flask, request, jsonify
+from flask_socketio import SocketIO
 
 import threading
 import time
@@ -15,7 +16,17 @@ app = Flask(
     template_folder="web/templates",
 )
 
-##set startubg varuabkes
+
+# Update the SocketIO initialization
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="threading",  # Use threading mode
+    logger=True,  # Enable logging
+    engineio_logger=True,
+)  # Enable Engine.IO logging
+
+##set starting variables
 sensor_data = {"moisture": 0}
 pump_state = {"pump": False}
 
@@ -23,25 +34,15 @@ pump_state = {"pump": False}
 # Initialize data with some starting values
 data = [
     {"date": 1, "value": 10},
-    {"date": 2, "value": 65},
-    {"date": 3, "value": 96},
-    {"date": 4, "value": 97},
-    {"date": 5, "value": 97},
-    {"date": 6, "value": 19},
-    {"date": 7, "value": 67},
-    {"date": 8, "value": 13},
-    {"date": 9, "value": 43},
-    {"date": 10, "value": 54},
-    {"date": 11, "value": 13},
-    {"date": 12, "value": 98},
 ]
+max_data_points = 100  # Limit the number of data points to keep memory usage reasonable
 
 
 # Function to add data periodically
 def add_data_periodically():
     global data
     while True:
-        time.sleep(30)  # Wait for 30 seconds
+        time.sleep(0.5)  # Wait for 0.5 seconds (increased frequency)
         # Get the last date value and increment by 1
         last_date = data[-1]["date"] if data else 0
         new_date = last_date + 1
@@ -49,18 +50,24 @@ def add_data_periodically():
         new_value = random.randint(0, 100)
         # Add new data point to our array
         data.append({"date": new_date, "value": new_value})
-        print(f"Added new data point: date={new_date}, value={new_value}")
+        # Emit the updated data via SocketIO
+        socketio.emit("data_update", data)
+        # Keep the data array size manageable
+        if len(data) > max_data_points:
+            data.pop(0)
 
 
-# Start the background thread
-data_thread = threading.Thread(target=add_data_periodically, daemon=True)
-data_thread.start()
+# Start the background thread after SocketIO is initialized
+@socketio.on("connect")
+def handle_connect():
+    print("Client connected")
+    # Send the current data to the newly connected client
+    socketio.emit("data_update", data, to=request.sid)
 
 
-# /sensor POST sets sensor data and returns status ✅
-# /status GET returns sensor and pump unpacked in a list ✅
-# /pump GET return pump_state ✅
-# /pump POST  sets the pump state to the value if it is there and false if it isn't, returns status ✅
+@socketio.on("disconnect")
+def handle_disconnect():
+    print("Client disconnected")
 
 
 @app.route("/")
@@ -103,10 +110,16 @@ def button():
     return jsonify({"status", "ok"})
 
 
+# Keep this endpoint for initial data loading or API compatibility
 @app.route("/data", methods=["GET"])
 def get_data():
     return jsonify(data)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5555)
+    # Start the background thread
+    data_thread = threading.Thread(target=add_data_periodically, daemon=True)
+    data_thread.start()
+
+    # Run the SocketIO app instead of the Flask app
+    socketio.run(app, host="0.0.0.0", port=5555, debug=True)

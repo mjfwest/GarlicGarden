@@ -3,9 +3,8 @@
 <script type="module">
 
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
-
-
-
+// Import Socket.IO client library
+import { io } from "https://cdn.socket.io/4.4.1/socket.io.esm.min.js";
 
 // Declare the chart dimensions and margins.
 const width = 640;
@@ -14,8 +13,6 @@ const marginTop = 20;
 const marginRight = 20;
 const marginBottom = 30;
 const marginLeft = 40;
-
-
 
 // Declare the x (horizontal position) scale.
 const x = d3.scaleLinear()
@@ -26,13 +23,12 @@ const y = d3.scaleLinear()
     .domain([0, 100])
     .range([height - marginBottom, marginTop]);
 
-    // Create the SVG container.
+// Create the SVG container.
 const svg = d3.create("svg")
     .attr("width", width)
     .attr("height", height);
 
-
-    // Add the axes groups, but don't populate them yet
+// Add the axes groups, but don't populate them yet
 const xAxisGroup = svg.append("g")
     .attr("class", "x-axis")
     .attr("transform", `translate(0,${height - marginBottom})`);
@@ -41,23 +37,27 @@ const yAxisGroup = svg.append("g")
     .attr("class", "y-axis")
     .attr("transform", `translate(${marginLeft},0)`);
 
+// Connect to Socket.IO server
+const socket = io({
+  transports: ['websocket'],
+  upgrade: false  // Disable transport upgrades
+});
 
-function fetch_data_and_update_chart (){
-    fetch('/data')
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-      return response.json();
-    })
-    .then(data => {
-        console.log("Data received:", data);
-        updateScalesAndAxes(data);
-        updateExternalDataDiagram(data);
-        
-    })
-}
+// Listen for data updates
+socket.on('data_update', (data) => {
+    console.log("Data received via Socket.IO:", data);
+    updateScalesAndAxes(data);
+    updateExternalDataDiagram(data);
+});
 
+// Handle connection events
+socket.on('connect', () => {
+    console.log('Connected to server');
+});
+
+socket.on('disconnect', () => {
+    console.log('Disconnected from server');
+});
 
 function updateScalesAndAxes(data) {
     // Update the x-scale domain based on the data
@@ -74,7 +74,6 @@ function updateScalesAndAxes(data) {
 }
 
 function updateExternalDataDiagram(data) {
-    
     // Create a line generator for the external data
     const line = d3
         .line()
@@ -94,21 +93,30 @@ function updateExternalDataDiagram(data) {
         .attr("stroke-width", 2)
 }
 
-// Add button for manual data refresh
+// Add a button to manually reconnect if needed
 d3.select("body")
     .append("button")
-    .attr("id", "fetch-data-btn")
+    .attr("id", "reconnect-btn")
     .style("margin", "10px")
     .style("padding", "5px 10px")
-    .text("Fetch External Data")
-    .on("click", fetch_data_and_update_chart);
+    .text("Reconnect to Server")
+    .on("click", () => {
+        if (socket.disconnected) {
+            socket.connect();
+        }
+    });
 
 // Append the SVG element.
 container.append(svg.node());
 
-// Initial data fetch
-fetch_data_and_update_chart();
+// Initial fetch in case socket connection is delayed
+fetch('/data')
+    .then(response => response.json())
+    .then(data => {
+        console.log("Initial data fetched:", data);
+        updateScalesAndAxes(data);
+        updateExternalDataDiagram(data);
+    })
+    .catch(error => console.error("Error fetching initial data:", error));
 
-// Set up auto-refresh every 30 seconds
-setInterval(fetch_data_and_update_chart, 30000);
 </script>
