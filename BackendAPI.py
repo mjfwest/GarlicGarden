@@ -10,6 +10,7 @@ import time
 import random
 from datetime import datetime, timedelta
 import threading
+import psutil
 
 redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 # make app
@@ -36,6 +37,88 @@ pump_state = {"pump": False}
 max_data_points = 100
 
 
+def get_cpu_temperature():
+    """Read CPU temperature on Linux systems"""
+    try:
+        # Try the most common temperature source first
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+            return temp
+    except:
+        try:
+            # Try using sensors command if available
+            import subprocess
+
+            output = subprocess.check_output(["sensors"], universal_newlines=True)
+            for line in output.split("\n"):
+                if "Core 0" in line and "°C" in line:
+                    return float(line.split("+")[1].split("°C")[0].strip())
+        except:
+            # Return a placeholder if we can't get the temperature
+            return None  # Placeholder
+
+
+def cpu_usage_publisher():
+    """Publish CPU usage percentage every 5 seconds"""
+    while True:
+        try:
+            usage = psutil.cpu_percent(interval=1)
+            data_point = {"value": usage, "date": time.time()}
+            key = "cpu_usage_data"
+            stored_data = redis_client.get(key)
+            usage_data = json.loads(stored_data) if stored_data else []
+            usage_data.append(data_point)
+            redis_client.set(key, json.dumps(usage_data))
+            redis_client.publish("cpu_usage_channel", json.dumps(data_point))
+        except Exception as e:
+            print(f"Error publishing CPU usage: {e}")
+        time.sleep(4)  # 1s for cpu_percent + 4s = 5s total
+
+
+def cpu_temp_publisher():
+    """Publish CPU temperature every 5 seconds"""
+    while True:
+        try:
+            # Get CPU temperature
+            temp = get_cpu_temperature()
+
+            # Create data point
+            data_point = {"value": temp, "date": time.time()}
+
+            # Store in Redis
+            key = "cpu_temp_data"
+            stored_data = redis_client.get(key)
+            temp_data = json.loads(stored_data) if stored_data else []
+            temp_data.append(data_point)
+            redis_client.set(key, json.dumps(temp_data))
+
+            # Publish to channel
+            redis_client.publish("cpu_temp_channel", json.dumps(data_point))
+        except Exception as e:
+            print(f"Error publishing CPU temp: {e}")
+
+        # Wait 5 seconds
+        time.sleep(5)
+
+
+def cpu_usage_pubsub_listener():
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("cpu_usage_channel")
+    for message in pubsub.listen():
+        if message["type"] == "message":
+            new_point = json.loads(message["data"])
+            socketio.emit("cpu_usage", new_point, room="cpu_usage")
+
+
+def cpu_temp_pubsub_listener():
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("cpu_temp_channel")
+    for message in pubsub.listen():
+        if message["type"] == "message":
+            new_point = json.loads(message["data"])
+            socketio.emit("cpu_temp", new_point, room="cpu_temp")
+
+
 def humidity_pubsub_listener():
     pubsub = redis_client.pubsub()
     pubsub.subscribe("humidity_channel")
@@ -59,7 +142,7 @@ def temperature_pubsub_listener():
 @socketio.on("subscribe")
 def handle_subscribe(data):
     stream = data.get("stream")
-    if stream in ("humidity", "temperature"):
+    if stream in ("humidity", "temperature", "cpu_usage"):
         join_room(stream)
         # Send the last N points immediately from Redis
         key = f"{stream}_data"
@@ -75,8 +158,21 @@ def handle_subscribe(data):
 @socketio.on("unsubscribe")
 def handle_unsubscribe(data):
     stream = data.get("stream")
-    if stream in ("humidity", "temperature"):
+    if stream in ("humidity", "temperature", "cpu_usage"):
         leave_room(stream)
+
+
+# Add a new endpoint to list all available streams
+@app.route("/streams", methods=["GET"])
+def get_streams():
+    # Define available streams with friendly names and colors
+    available_streams = [
+        {"id": "humidity", "name": "Humidity", "color": "#1f77b4"},
+        {"id": "temperature", "name": "Temperature", "color": "#ff8c00"},
+        # {"id": "cpu_temp", "name": "CPU Temperature", "color": "#2ca02c"},
+        {"id": "cpu_usage", "name": "CPU Usage (%)", "color": "#d62728"},
+    ]
+    return jsonify(available_streams)
 
 
 # publish endpoints for IoT devices
@@ -200,6 +296,10 @@ if __name__ == "__main__":
     # Start the background task using SocketIO's helper
     threading.Thread(target=humidity_pubsub_listener, daemon=True).start()
     threading.Thread(target=temperature_pubsub_listener, daemon=True).start()
+    threading.Thread(target=cpu_temp_pubsub_listener, daemon=True).start()
+    # Start CPU temperature publisher
+    threading.Thread(target=cpu_usage_pubsub_listener, daemon=True).start()
+    threading.Thread(target=cpu_usage_publisher, daemon=True).start()
 
     # Run the SocketIO app instead of the Flask app
     socketio.run(app, host="0.0.0.0", port=5555, debug=True)

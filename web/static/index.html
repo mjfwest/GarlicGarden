@@ -1,17 +1,19 @@
 ﻿<!DOCTYPE html>
 <div id="container"></div>
-<label for="stream-select">Data Streams:</label>
-<select id="stream-select" multiple size="2">
-  <option value="humidity">Humidity</option>
-  <option value="temperature">Temperature</option>
-</select>
-
-<label for="window-select">Display Window:</label>
-<select id="window-select">
-  <option value="60">1 minute</option>
-  <option value="600">10 minutes</option>
-  <option value="3600">1 hour</option>
-</select>
+<div class="controls">
+  <div>
+    <p>Data Streams:</p>
+    <div id="stream-checkboxes" class="checkbox-group"></div>
+  </div>
+  <div>
+    <label for="window-select">Display Window:</label>
+    <select id="window-select">
+      <option value="60">1 minute</option>
+      <option value="600">10 minutes</option>
+      <option value="3600">1 hour</option>
+    </select>
+  </div>
+</div>
 <script type="module">
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 import { io } from "https://cdn.socket.io/4.4.1/socket.io.esm.min.js";
@@ -24,107 +26,192 @@ const xAxisGroup = svg.append("g").attr("class", "x-axis").attr("transform", `tr
 const yAxisGroup = svg.append("g").attr("class", "y-axis").attr("transform", `translate(${marginLeft},0)`);
 container.append(svg.node());
 
+// Add a legend group
+const legend = svg.append("g")
+  .attr("class", "legend")
+  .attr("transform", `translate(${width - 120}, ${marginTop + 10})`);
+
+
 const socket = io({ transports: ['websocket'], upgrade: false });
 const streamColors = { humidity: "#1f77b4", temperature: "#ff8c00" };
 let subscribedStreams = new Set();
 let streamData = {};
-
 let displayWindow = 60; // default to 1 minute
-document.getElementById("window-select").addEventListener("change", (e) => {
-    displayWindow = parseInt(e.target.value, 10);
-    updateChart();
-});
 
-function subscribeToStreams(newStreams) {
-    // Unsubscribe from streams that are no longer selected
-    for (const stream of subscribedStreams) {
-        if (!newStreams.has(stream)) {
-            socket.emit("unsubscribe", { stream });
-            socket.off(stream);
-            delete streamData[stream];
+
+// Fetch available streams and populate checkboxes
+fetch('/streams')
+  .then(response => response.json())
+  .then(streams => {
+    const checkboxContainer = document.getElementById('stream-checkboxes');
+    
+    // Save colors for later use
+    streams.forEach(stream => {
+      streamColors[stream.id] = stream.color;
+    });
+    
+    // Create a checkbox for each stream
+    streams.forEach(stream => {
+      const checkbox = document.createElement('div');
+      checkbox.className = 'checkbox-item';
+      
+      // Create color swatch
+      const swatch = document.createElement('span');
+      swatch.className = 'color-swatch';
+      swatch.style.backgroundColor = stream.color;
+      checkbox.appendChild(swatch);
+      
+      // Create actual checkbox input
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = `stream-${stream.id}`;
+      input.value = stream.id;
+      input.checked = true; // Default to checked
+      checkbox.appendChild(input);
+      
+      // Create label
+      const label = document.createElement('label');
+      label.htmlFor = `stream-${stream.id}`;
+      label.textContent = stream.name;
+      checkbox.appendChild(label);
+      
+      checkboxContainer.appendChild(checkbox);
+      
+      // Subscribe to this stream initially
+      subscribedStreams.add(stream.id);
+      subscribeToStream(stream.id);
+      
+      // Add change event listener
+      input.addEventListener('change', function() {
+        if (this.checked) {
+          subscribeToStream(this.value);
+          subscribedStreams.add(this.value);
+        } else {
+          socket.emit("unsubscribe", { stream: this.value });
+          subscribedStreams.delete(this.value);
+          delete streamData[this.value];
+          updateChart();
+          updateLegend();
         }
+      });
+    });
+    
+    updateLegend();
+  });
+
+function subscribeToStream(stream) {
+  socket.emit("subscribe", { stream });
+  socket.on(stream, data => {
+    if (Array.isArray(data)) {
+      streamData[stream] = data;
+    } else {
+      if (!streamData[stream]) streamData[stream] = [];
+      streamData[stream].push(data);
     }
-    // Subscribe to new streams
-    for (const stream of newStreams) {
-        if (!subscribedStreams.has(stream)) {
-            socket.emit("subscribe", { stream });
-            // Handler for initial array or single new point
-            socket.on(stream, data => {
-                if (Array.isArray(data)) {
-                    streamData[stream] = data;
-                } else {
-                    if (!streamData[stream]) streamData[stream] = [];
-                    streamData[stream].push(data);
-                }
-                updateChart();
-            });
-            // Fetch initial data for the stream (optional, since subscribe sends it)
-            fetch(`/data/${stream}`)
-                .then(r => r.json())
-                .then(data => {
-                    streamData[stream] = data;
-                    updateChart();
-                });
-        }
-    }
-    subscribedStreams = newStreams;
+    updateChart();
+  });
 }
+
+document.getElementById("window-select").addEventListener("change", (e) => {
+  displayWindow = parseInt(e.target.value, 10);
+  updateChart();
+});
 
 function updateChart() {
-    // Flatten all data to get global x domain
-    const now = Date.now() / 1000; // current time in seconds
-    const allData = Object.values(streamData).flat();
-    if (allData.length === 0) return;
+  // Flatten all data to get global x domain
+  const now = Date.now() / 1000; // current time in seconds
+  
+  // Filter data to only include points within the selected window
+  const filteredData = {};
+  for (const [stream, data] of Object.entries(streamData)) {
+    filteredData[stream] = data.filter(d => d.date >= now - displayWindow);
+  }
+  
+  const allFiltered = Object.values(filteredData).flat();
+  if (allFiltered.length === 0) return;
+  
+  const minDate = d3.min(allFiltered, d => d.date);
+  const maxDate = d3.max(allFiltered, d => d.date);
+  const xBuffer = Math.max(1, (maxDate - minDate) * 0.05);
+  
+  x.domain([
+    new Date((minDate - xBuffer) * 1000),
+    new Date((maxDate + xBuffer) * 1000)
+  ]);
+  xAxisGroup.call(d3.axisBottom(x).tickFormat(d3.utcFormat("%H:%M:%S")));
+  yAxisGroup.call(d3.axisLeft(y));
 
-    // Filter data to only include points within the selected window
-    const filteredData = {};
-    for (const [stream, data] of Object.entries(streamData)) {
-        filteredData[stream] = data.filter(d => d.date >= now - displayWindow);
-    }
+  // Data join for multiple lines
+  const streams = Array.from(subscribedStreams);
+  const lines = svg.selectAll(".data-line")
+    .data(streams, d => d);
 
-    // Find min/max date for the filtered data
-    const allFiltered = Object.values(filteredData).flat();
-    if (allFiltered.length === 0) return;
-    const minDate = d3.min(allFiltered, d => d.date);
-    const maxDate = d3.max(allFiltered, d => d.date);
-    const xBuffer = Math.max(1, (maxDate - minDate) * 0.05);
+  // ENTER + UPDATE
+  lines.enter()
+    .append("path")
+    .attr("class", "data-line")
+    .attr("fill", "none")
+    .attr("stroke-width", 2)
+    .attr("stroke", d => streamColors[d] || "#000")
+    .merge(lines)
+    .attr("d", d => d3.line()
+      .x(pt => x(new Date(pt.date * 1000)))
+      .y(pt => y(pt.value))
+      (filteredData[d] || [])
+    );
 
-    x.domain([
-        new Date((minDate - xBuffer) * 1000),
-        new Date((maxDate + xBuffer) * 1000)
-    ]);
-    xAxisGroup.call(d3.axisBottom(x).tickFormat(d3.utcFormat("%H:%M:%S")));
-    yAxisGroup.call(d3.axisLeft(y));
-
-    // Data join for multiple lines
-    const streams = Array.from(subscribedStreams);
-    const lines = svg.selectAll(".data-line")
-        .data(streams, d => d);
-
-    // ENTER + UPDATE
-    lines.enter()
-        .append("path")
-        .attr("class", "data-line")
-        .attr("fill", "none")
-        .attr("stroke-width", 2)
-        .attr("stroke", d => streamColors[d] || "#000")
-        .merge(lines)
-        .attr("d", d => d3.line()
-            .x(pt => x(new Date(pt.date * 1000)))
-            .y(pt => y(pt.value))
-            (filteredData[d] || [])
-        );
-
-    // EXIT
-    lines.exit().remove();
+  // EXIT
+  lines.exit().remove();
+  
+  updateLegend();
+}
+function updateLegend() {
+  // Clear existing legend
+  legend.selectAll("*").remove();
+  
+  // Add a legend item for each active stream
+  const streams = Array.from(subscribedStreams);
+  streams.forEach((stream, i) => {
+    const legendItem = legend.append("g")
+      .attr("transform", `translate(0, ${i * 20})`);
+      
+    legendItem.append("rect")
+      .attr("width", 10)
+      .attr("height", 10)
+      .attr("fill", streamColors[stream]);
+      
+    legendItem.append("text")
+      .attr("x", 15)
+      .attr("y", 9)
+      .text(stream);
+  });
 }
 
-// Handle multi-select changes
-document.getElementById("stream-select").addEventListener("change", (e) => {
-    const selected = new Set(Array.from(e.target.selectedOptions).map(opt => opt.value));
-    subscribeToStreams(selected);
-});
-
-// Initial subscribe to both
-subscribeToStreams(new Set(["humidity", "temperature"]));
+// Add some CSS styles
+const style = document.createElement('style');
+style.textContent = `
+  .controls {
+    display: flex;
+    flex-direction: column;
+    margin: 10px 0;
+  }
+  .checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .color-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+  }
+`;
+document.head.appendChild(style);
 </script>
