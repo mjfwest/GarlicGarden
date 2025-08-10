@@ -36,19 +36,6 @@ pump_state = {"pump": False}
 max_data_points = 100
 
 
-def add_humidity_data():
-    while True:
-        time.sleep(0.5)
-        new_point = {"date": time.time(), "value": random.randint(0, 50)}
-        # Append to stored data for history
-        data = redis_client.get("humidity_data")
-        humidity_data = json.loads(data) if data else []
-        humidity_data.append(new_point)
-        redis_client.set("humidity_data", json.dumps(humidity_data))
-        # Publish new point to Redis pub/sub channel
-        redis_client.publish("humidity_channel", json.dumps(new_point))
-
-
 def humidity_pubsub_listener():
     pubsub = redis_client.pubsub()
     pubsub.subscribe("humidity_channel")
@@ -57,19 +44,6 @@ def humidity_pubsub_listener():
             new_point = json.loads(message["data"])
             # Emit to all Socket.IO clients in the "humidity" room
             socketio.emit("humidity", new_point, room="humidity")
-
-
-def add_temperature_data():
-    while True:
-        time.sleep(2.0)
-        new_point = {"date": time.time(), "value": random.randint(50, 100)}
-        # Append to stored data for history
-        data = redis_client.get("temperature_data")
-        temperature_data = json.loads(data) if data else []
-        temperature_data.append(new_point)
-        redis_client.set("temperature_data", json.dumps(temperature_data))
-        # Publish new point to Redis pub/sub channel
-        redis_client.publish("temperature_channel", json.dumps(new_point))
 
 
 def temperature_pubsub_listener():
@@ -98,6 +72,48 @@ def handle_subscribe(data):
             emit(stream, [])
 
 
+@socketio.on("unsubscribe")
+def handle_unsubscribe(data):
+    stream = data.get("stream")
+    if stream in ("humidity", "temperature"):
+        leave_room(stream)
+
+
+# publish endpoints for IoT devices
+@app.route("/publish/<stream>", methods=["POST"])
+def publish_data(stream):
+    if stream not in ["humidity", "temperature"]:
+        return jsonify({"error": "Invalid stream"}), 400
+
+    try:
+        # Get data from request
+        data = request.json
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Ensure it has required fields
+        if "value" not in data:
+            return jsonify({"error": "Missing 'value' field"}), 400
+
+        # Add timestamp if not provided
+        if "date" not in data:
+            data["date"] = time.time()
+
+        # Store in Redis
+        key = f"{stream}_data"
+        stored_data = redis_client.get(key)
+        stream_data = json.loads(stored_data) if stored_data else []
+        stream_data.append(data)
+        redis_client.set(key, json.dumps(stream_data))
+
+        # Publish to channel
+        redis_client.publish(f"{stream}_channel", json.dumps(data))
+
+        return jsonify({"status": "published"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/data/<stream>", methods=["GET"])
 def get_data(stream):
     key = f"{stream}_data"
@@ -108,11 +124,36 @@ def get_data(stream):
         return jsonify([]), 404
 
 
-@socketio.on("unsubscribe")
-def handle_unsubscribe(data):
-    stream = data.get("stream")
-    if stream in ("humidity", "temperature"):
-        leave_room(stream)
+# Add a simple simulator endpoint for development
+@app.route("/simulate", methods=["GET"])
+def simulate_data():
+    """Generate fake data for development"""
+    import random
+
+    humidity = {"value": random.randint(0, 50), "date": time.time()}
+    temperature = {"value": random.randint(50, 100), "date": time.time()}
+
+    # Store and publish humidity
+    redis_client.publish("humidity_channel", json.dumps(humidity))
+    h_data = redis_client.get("humidity_data")
+    h_list = json.loads(h_data) if h_data else []
+    h_list.append(humidity)
+    redis_client.set("humidity_data", json.dumps(h_list))
+
+    # Store and publish temperature
+    redis_client.publish("temperature_channel", json.dumps(temperature))
+    t_data = redis_client.get("temperature_data")
+    t_list = json.loads(t_data) if t_data else []
+    t_list.append(temperature)
+    redis_client.set("temperature_data", json.dumps(t_list))
+
+    return jsonify(
+        {
+            "status": "simulated data sent",
+            "humidity": humidity,
+            "temperature": temperature,
+        }
+    )
 
 
 @app.route("/")
@@ -157,8 +198,6 @@ def button():
 
 if __name__ == "__main__":
     # Start the background task using SocketIO's helper
-    socketio.start_background_task(add_humidity_data)
-    socketio.start_background_task(add_temperature_data)
     threading.Thread(target=humidity_pubsub_listener, daemon=True).start()
     threading.Thread(target=temperature_pubsub_listener, daemon=True).start()
 
