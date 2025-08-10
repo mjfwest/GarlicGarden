@@ -2,14 +2,16 @@
 
 eventlet.monkey_patch()
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO
-
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import redis
+import json
 
 import time
 import random
 from datetime import datetime, timedelta
+import threading
 
-
+redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 # make app
 app = Flask(
     __name__,
@@ -23,6 +25,7 @@ app = Flask(
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
+    message_queue="redis://localhost:6379/0",  # Adjust if your Redis is elsewhere
     logger=True,
     engineio_logger=True,
 )
@@ -30,45 +33,86 @@ socketio = SocketIO(
 ##set starting variables
 sensor_data = {"moisture": 0}
 pump_state = {"pump": False}
+max_data_points = 100
 
 
-# Initialize data with some starting values
-data = [
-    {"date": 1, "value": 10},
-]
-max_data_points = 100  # Limit the number of data points to keep memory usage reasonable
-
-
-# Function to add data periodically
-def add_data_periodically():
-    global data
+def add_humidity_data():
     while True:
-        time.sleep(0.5)  # Wait for 0.5 seconds (increased frequency)
-        # Get the last date value and increment by 1
-        last_date = data[-1]["date"] if data else 0
-        new_date = last_date + 1
-        # Generate a random value between 0 and 100
-        new_value = random.randint(0, 100)
-        # Add new data point to our array
-        data.append({"date": new_date, "value": new_value})
-        # Emit the updated data via SocketIO
-        socketio.emit("data_update", data)
-        # Keep the data array size manageable
-        if len(data) > max_data_points:
-            data.pop(0)
+        time.sleep(0.5)
+        new_point = {"date": time.time(), "value": random.randint(0, 50)}
+        # Append to stored data for history
+        data = redis_client.get("humidity_data")
+        humidity_data = json.loads(data) if data else []
+        humidity_data.append(new_point)
+        redis_client.set("humidity_data", json.dumps(humidity_data))
+        # Publish new point to Redis pub/sub channel
+        redis_client.publish("humidity_channel", json.dumps(new_point))
 
 
-# Start the background thread after SocketIO is initialized
-@socketio.on("connect")
-def handle_connect():
-    print("Client connected")
-    # Send the current data to the newly connected client
-    socketio.emit("data_update", data, to=request.sid)
+def humidity_pubsub_listener():
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("humidity_channel")
+    for message in pubsub.listen():
+        if message["type"] == "message":
+            new_point = json.loads(message["data"])
+            # Emit to all Socket.IO clients in the "humidity" room
+            socketio.emit("humidity", new_point, room="humidity")
 
 
-@socketio.on("disconnect")
-def handle_disconnect():
-    print("Client disconnected")
+def add_temperature_data():
+    while True:
+        time.sleep(2.0)
+        new_point = {"date": time.time(), "value": random.randint(50, 100)}
+        # Append to stored data for history
+        data = redis_client.get("temperature_data")
+        temperature_data = json.loads(data) if data else []
+        temperature_data.append(new_point)
+        redis_client.set("temperature_data", json.dumps(temperature_data))
+        # Publish new point to Redis pub/sub channel
+        redis_client.publish("temperature_channel", json.dumps(new_point))
+
+
+def temperature_pubsub_listener():
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("temperature_channel")
+    for message in pubsub.listen():
+        if message["type"] == "message":
+            new_point = json.loads(message["data"])
+            # Emit to all Socket.IO clients in the "humidity" room
+            socketio.emit("temperature", new_point, room="temperature")
+
+
+@socketio.on("subscribe")
+def handle_subscribe(data):
+    stream = data.get("stream")
+    if stream in ("humidity", "temperature"):
+        join_room(stream)
+        # Send the last N points immediately from Redis
+        key = f"{stream}_data"
+        data_json = redis_client.get(key)
+        if data_json:
+            arr = json.loads(data_json)
+            # Send last 100 points (or fewer if not enough)
+            emit(stream, arr[-100:])
+        else:
+            emit(stream, [])
+
+
+@app.route("/data/<stream>", methods=["GET"])
+def get_data(stream):
+    key = f"{stream}_data"
+    data_json = redis_client.get(key)
+    if data_json:
+        return jsonify(json.loads(data_json))
+    else:
+        return jsonify([]), 404
+
+
+@socketio.on("unsubscribe")
+def handle_unsubscribe(data):
+    stream = data.get("stream")
+    if stream in ("humidity", "temperature"):
+        leave_room(stream)
 
 
 @app.route("/")
@@ -111,14 +155,12 @@ def button():
     return jsonify({"status", "ok"})
 
 
-# Keep this endpoint for initial data loading or API compatibility
-@app.route("/data", methods=["GET"])
-def get_data():
-    return jsonify(data)
-
-
 if __name__ == "__main__":
     # Start the background task using SocketIO's helper
-    socketio.start_background_task(add_data_periodically)
+    socketio.start_background_task(add_humidity_data)
+    socketio.start_background_task(add_temperature_data)
+    threading.Thread(target=humidity_pubsub_listener, daemon=True).start()
+    threading.Thread(target=temperature_pubsub_listener, daemon=True).start()
+
     # Run the SocketIO app instead of the Flask app
     socketio.run(app, host="0.0.0.0", port=5555, debug=True)
