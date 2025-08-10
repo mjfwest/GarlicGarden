@@ -1,8 +1,10 @@
-﻿import flask
+﻿import eventlet
+
+eventlet.monkey_patch()
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO
 
-import threading
+
 import time
 import random
 from datetime import datetime, timedelta
@@ -21,10 +23,9 @@ app = Flask(
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode="threading",  # Use threading mode
-    logger=True,  # Enable logging
+    logger=True,
     engineio_logger=True,
-)  # Enable Engine.IO logging
+)
 
 ##set starting variables
 sensor_data = {"moisture": 0}
@@ -117,9 +118,7 @@ def get_data():
 
 
 if __name__ == "__main__":
-    # Start the background thread
-    data_thread = threading.Thread(target=add_data_periodically, daemon=True)
-    data_thread.start()
-
+    # Start the background task using SocketIO's helper
+    socketio.start_background_task(add_data_periodically)
     # Run the SocketIO app instead of the Flask app
     socketio.run(app, host="0.0.0.0", port=5555, debug=True)
