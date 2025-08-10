@@ -5,6 +5,43 @@
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
 
 
+
+
+// Declare the chart dimensions and margins.
+const width = 640;
+const height = 400;
+const marginTop = 20;
+const marginRight = 20;
+const marginBottom = 30;
+const marginLeft = 40;
+
+
+
+// Declare the x (horizontal position) scale.
+const x = d3.scaleLinear()
+    .range([marginLeft, width - marginRight]);
+
+// Declare the y (vertical position) scale.
+const y = d3.scaleLinear()
+    .domain([0, 100])
+    .range([height - marginBottom, marginTop]);
+
+    // Create the SVG container.
+const svg = d3.create("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+
+    // Add the axes groups, but don't populate them yet
+const xAxisGroup = svg.append("g")
+    .attr("class", "x-axis")
+    .attr("transform", `translate(0,${height - marginBottom})`);
+
+const yAxisGroup = svg.append("g")
+    .attr("class", "y-axis")
+    .attr("transform", `translate(${marginLeft},0)`);
+
+
 function fetch_data_and_update_chart (){
     fetch('/data')
     .then(response => {
@@ -15,16 +52,34 @@ function fetch_data_and_update_chart (){
     })
     .then(data => {
         console.log("Data received:", data);
+        updateScalesAndAxes(data);
         updateExternalDataDiagram(data);
+        
     })
 }
 
+
+function updateScalesAndAxes(data) {
+    // Update the x-scale domain based on the data
+    const minDate = d3.min(data, d => d.date);
+    const maxDate = d3.max(data, d => d.date);
+    
+    // Add a small buffer on both sides
+    const xBuffer = Math.max(1, (maxDate - minDate) * 0.05);
+    x.domain([minDate - xBuffer, maxDate + xBuffer]);
+    
+    // Redraw the axes with the updated scales
+    xAxisGroup.call(d3.axisBottom(x).tickFormat(d3.format("d"))); // Format as integers
+    yAxisGroup.call(d3.axisLeft(y));
+}
+
 function updateExternalDataDiagram(data) {
+    
     // Create a line generator for the external data
     const line = d3
         .line()
-        .x((d, i) => x(d["date"]))
-        .y(d => y(d["value"]));
+        .x(d => x(d.date))
+        .y(d => y(d.value));
 
     // Remove any previous external data line
     svg.selectAll(".external-mmf").remove();
@@ -39,26 +94,7 @@ function updateExternalDataDiagram(data) {
         .attr("stroke-width", 2)
 }
 
-// Declare the chart dimensions and margins.
-const width = 640;
-const height = 400;
-const marginTop = 20;
-const marginRight = 20;
-const marginBottom = 30;
-const marginLeft = 40;
-
-
-
-// Declare the x (horizontal position) scale.
-const x = d3.scaleLinear()
-    .domain([1, 12])
-    .range([marginLeft, width - marginRight]);
-
-// Declare the y (vertical position) scale.
-const y = d3.scaleLinear()
-    .domain([0, 100])
-    .range([height - marginBottom, marginTop]);
-
+// Add button for manual data refresh
 d3.select("body")
     .append("button")
     .attr("id", "fetch-data-btn")
@@ -67,22 +103,12 @@ d3.select("body")
     .text("Fetch External Data")
     .on("click", fetch_data_and_update_chart);
 
-// Create the SVG container.
-const svg = d3.create("svg")
-    .attr("width", width)
-    .attr("height", height);
-
-// Add the x-axis.
-svg.append("g")
-    .attr("transform", `translate(0,${height - marginBottom})`)
-    .call(d3.axisBottom(x));
-
-// Add the y-axis.
-svg.append("g")
-    .attr("transform", `translate(${marginLeft},0)`)
-    .call(d3.axisLeft(y));
-
 // Append the SVG element.
 container.append(svg.node());
 
+// Initial data fetch
+fetch_data_and_update_chart();
+
+// Set up auto-refresh every 30 seconds
+setInterval(fetch_data_and_update_chart, 30000);
 </script>
