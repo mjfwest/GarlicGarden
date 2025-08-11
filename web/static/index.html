@@ -47,7 +47,7 @@ fetch('/streams')
     
     // Save colors for later use
     streams.forEach(stream => {
-      streamColors[stream.id] = stream.color;
+      streamColors[stream.id] = stream.colour;
     });
     
     // Create a checkbox for each stream
@@ -55,10 +55,10 @@ fetch('/streams')
       const checkbox = document.createElement('div');
       checkbox.className = 'checkbox-item';
       
-      // Create color swatch
+      // Create colour swatch
       const swatch = document.createElement('span');
-      swatch.className = 'color-swatch';
-      swatch.style.backgroundColor = stream.color;
+      swatch.className = 'colour-swatch';
+      swatch.style.backgroundColor = stream.colour;
       checkbox.appendChild(swatch);
       
       // Create actual checkbox input
@@ -206,7 +206,7 @@ style.textContent = `
     align-items: center;
     gap: 5px;
   }
-  .color-swatch {
+  .colour-swatch {
     display: inline-block;
     width: 12px;
     height: 12px;
