@@ -293,10 +293,7 @@ def publish_data(stream):
 
         # Store in Redis
         key = f"{stream}_data"
-        stored_data = redis_client.get(key)
-        stream_data = json.loads(stored_data) if stored_data else []
-        stream_data.append(data)
-        redis_client.set(key, json.dumps(stream_data))
+        redis_client.zadd(key, {json.dumps(data): data["date"]})
 
         # Publish to channel
         redis_client.publish(f"{stream}_channel", json.dumps(data))
@@ -313,16 +310,32 @@ def get_data(stream):
 
     Args:
         stream (str): Stream ID to retrieve data for
+    Query Parameters:
+        duration (int): Optional. The number of seconds of historical data to retrieve.
 
     Returns:
         JSON array: Historical data points for the requested stream
     """
     key = f"{stream}_data"
-    data_json = redis_client.get(key)
-    if data_json:
-        return jsonify(json.loads(data_json))
-    else:
-        return jsonify([]), 404
+    duration = request.args.get("duration", type=int)
+
+    try:
+        if duration:
+            # Calculate the timestamp range
+            now = time.time()
+            min_score = now - duration
+            max_score = now
+
+            # Retrieve data from Redis sorted set
+            data = redis_client.zrangebyscore(key, min_score, max_score)
+        else:
+            # Retrieve all data if no duration is specified
+            data = redis_client.zrangebyscore(key, "-inf", "+inf")
+
+        # Deserialize the data points
+        return jsonify([json.loads(item) for item in data])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # Add a simple simulator endpoint for development
