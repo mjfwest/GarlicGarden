@@ -1,88 +1,217 @@
 ﻿<!DOCTYPE html>
 <div id="container"></div>
+<div class="controls">
+  <div>
+    <p>Data Streams:</p>
+    <div id="stream-checkboxes" class="checkbox-group"></div>
+  </div>
+  <div>
+    <label for="window-select">Display Window:</label>
+    <select id="window-select">
+      <option value="60">1 minute</option>
+      <option value="600">10 minutes</option>
+      <option value="3600">1 hour</option>
+    </select>
+  </div>
+</div>
 <script type="module">
-
 import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import { io } from "https://cdn.socket.io/4.4.1/socket.io.esm.min.js";
 
-
-function fetch_data_and_update_chart (){
-    fetch('/data')
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-      return response.json();
-    })
-    .then(data => {
-        console.log("Data received:", data);
-        updateExternalDataDiagram(data);
-    })
-}
-
-function updateExternalDataDiagram(data) {
-    // Create a line generator for the external data
-    const line = d3
-        .line()
-        .x((d, i) => x(d["date"]))
-        .y(d => y(d["value"]));
-
-    // Remove any previous external data line
-    svg.selectAll(".external-mmf").remove();
-
-    // Draw the new line
-    svg.append("path")
-        .datum(data)
-        .attr("class", "external-mmf")
-        .attr("d", line)
-        .attr("fill", "none")
-        .attr("stroke", "#ff8c00")  // Use a distinctive color
-        .attr("stroke-width", 2)
-}
-
-// Declare the chart dimensions and margins.
-const width = 640;
-const height = 400;
-const marginTop = 20;
-const marginRight = 20;
-const marginBottom = 30;
-const marginLeft = 40;
-
-
-
-// Declare the x (horizontal position) scale.
-const x = d3.scaleLinear()
-    .domain([1, 12])
-    .range([marginLeft, width - marginRight]);
-
-// Declare the y (vertical position) scale.
-const y = d3.scaleLinear()
-    .domain([0, 100])
-    .range([height - marginBottom, marginTop]);
-
-d3.select("body")
-    .append("button")
-    .attr("id", "fetch-data-btn")
-    .style("margin", "10px")
-    .style("padding", "5px 10px")
-    .text("Fetch External Data")
-    .on("click", fetch_data_and_update_chart);
-
-// Create the SVG container.
-const svg = d3.create("svg")
-    .attr("width", width)
-    .attr("height", height);
-
-// Add the x-axis.
-svg.append("g")
-    .attr("transform", `translate(0,${height - marginBottom})`)
-    .call(d3.axisBottom(x));
-
-// Add the y-axis.
-svg.append("g")
-    .attr("transform", `translate(${marginLeft},0)`)
-    .call(d3.axisLeft(y));
-
-// Append the SVG element.
+const width = 640, height = 400, marginTop = 20, marginRight = 20, marginBottom = 30, marginLeft = 40;
+const x = d3.scaleUtc().range([marginLeft, width - marginRight]);
+const y = d3.scaleLinear().domain([0, 100]).range([height - marginBottom, marginTop]);
+const svg = d3.create("svg").attr("width", width).attr("height", height);
+const xAxisGroup = svg.append("g").attr("class", "x-axis").attr("transform", `translate(0,${height - marginBottom})`);
+const yAxisGroup = svg.append("g").attr("class", "y-axis").attr("transform", `translate(${marginLeft},0)`);
 container.append(svg.node());
 
+// Add a legend group
+const legend = svg.append("g")
+  .attr("class", "legend")
+  .attr("transform", `translate(${width - 120}, ${marginTop + 10})`);
+
+
+const socket = io({ transports: ['websocket'], upgrade: false });
+const streamColors = { humidity: "#1f77b4", temperature: "#ff8c00" };
+let subscribedStreams = new Set();
+let streamData = {};
+let displayWindow = 60; // default to 1 minute
+
+
+// Fetch available streams and populate checkboxes
+fetch('/streams')
+  .then(response => response.json())
+  .then(streams => {
+    const checkboxContainer = document.getElementById('stream-checkboxes');
+    
+    // Save colors for later use
+    streams.forEach(stream => {
+      streamColors[stream.id] = stream.color;
+    });
+    
+    // Create a checkbox for each stream
+    streams.forEach(stream => {
+      const checkbox = document.createElement('div');
+      checkbox.className = 'checkbox-item';
+      
+      // Create color swatch
+      const swatch = document.createElement('span');
+      swatch.className = 'color-swatch';
+      swatch.style.backgroundColor = stream.color;
+      checkbox.appendChild(swatch);
+      
+      // Create actual checkbox input
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = `stream-${stream.id}`;
+      input.value = stream.id;
+      input.checked = true; // Default to checked
+      checkbox.appendChild(input);
+      
+      // Create label
+      const label = document.createElement('label');
+      label.htmlFor = `stream-${stream.id}`;
+      label.textContent = stream.name;
+      checkbox.appendChild(label);
+      
+      checkboxContainer.appendChild(checkbox);
+      
+      // Subscribe to this stream initially
+      subscribedStreams.add(stream.id);
+      subscribeToStream(stream.id);
+      
+      // Add change event listener
+      input.addEventListener('change', function() {
+        if (this.checked) {
+          subscribeToStream(this.value);
+          subscribedStreams.add(this.value);
+        } else {
+          socket.emit("unsubscribe", { stream: this.value });
+          subscribedStreams.delete(this.value);
+          delete streamData[this.value];
+          updateChart();
+          updateLegend();
+        }
+      });
+    });
+    
+    updateLegend();
+  });
+
+function subscribeToStream(stream) {
+  socket.emit("subscribe", { stream });
+  socket.on(stream, data => {
+    if (Array.isArray(data)) {
+      streamData[stream] = data;
+    } else {
+      if (!streamData[stream]) streamData[stream] = [];
+      streamData[stream].push(data);
+    }
+    updateChart();
+  });
+}
+
+document.getElementById("window-select").addEventListener("change", (e) => {
+  displayWindow = parseInt(e.target.value, 10);
+  updateChart();
+});
+
+function updateChart() {
+  // Flatten all data to get global x domain
+  const now = Date.now() / 1000; // current time in seconds
+  
+  // Filter data to only include points within the selected window
+  const filteredData = {};
+  for (const [stream, data] of Object.entries(streamData)) {
+    filteredData[stream] = data.filter(d => d.date >= now - displayWindow);
+  }
+  
+  const allFiltered = Object.values(filteredData).flat();
+  if (allFiltered.length === 0) return;
+  
+  const minDate = d3.min(allFiltered, d => d.date);
+  const maxDate = d3.max(allFiltered, d => d.date);
+  const xBuffer = Math.max(1, (maxDate - minDate) * 0.05);
+  
+  x.domain([
+    new Date((minDate - xBuffer) * 1000),
+    new Date((maxDate + xBuffer) * 1000)
+  ]);
+  xAxisGroup.call(d3.axisBottom(x).tickFormat(d3.utcFormat("%H:%M:%S")));
+  yAxisGroup.call(d3.axisLeft(y));
+
+  // Data join for multiple lines
+  const streams = Array.from(subscribedStreams);
+  const lines = svg.selectAll(".data-line")
+    .data(streams, d => d);
+
+  // ENTER + UPDATE
+  lines.enter()
+    .append("path")
+    .attr("class", "data-line")
+    .attr("fill", "none")
+    .attr("stroke-width", 2)
+    .attr("stroke", d => streamColors[d] || "#000")
+    .merge(lines)
+    .attr("d", d => d3.line()
+      .x(pt => x(new Date(pt.date * 1000)))
+      .y(pt => y(pt.value))
+      (filteredData[d] || [])
+    );
+
+  // EXIT
+  lines.exit().remove();
+  
+  updateLegend();
+}
+function updateLegend() {
+  // Clear existing legend
+  legend.selectAll("*").remove();
+  
+  // Add a legend item for each active stream
+  const streams = Array.from(subscribedStreams);
+  streams.forEach((stream, i) => {
+    const legendItem = legend.append("g")
+      .attr("transform", `translate(0, ${i * 20})`);
+      
+    legendItem.append("rect")
+      .attr("width", 10)
+      .attr("height", 10)
+      .attr("fill", streamColors[stream]);
+      
+    legendItem.append("text")
+      .attr("x", 15)
+      .attr("y", 9)
+      .text(stream);
+  });
+}
+
+// Add some CSS styles
+const style = document.createElement('style');
+style.textContent = `
+  .controls {
+    display: flex;
+    flex-direction: column;
+    margin: 10px 0;
+  }
+  .checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .color-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+  }
+`;
+document.head.appendChild(style);
 </script>
