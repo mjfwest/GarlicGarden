@@ -34,6 +34,7 @@ const legend = svg.append("g")
 
 const socket = io({ transports: ['websocket'], upgrade: false });
 const streamColors = { humidity: "#1f77b4", temperature: "#ff8c00" };
+const streamNames = {}; // Add this to store friendly names
 let subscribedStreams = new Set();
 let streamData = {};
 let displayWindow = 60; // default to 1 minute
@@ -45,9 +46,10 @@ fetch('/streams')
   .then(streams => {
     const checkboxContainer = document.getElementById('stream-checkboxes');
     
-    // Save colors for later use
+    // Save colors and names for later use
     streams.forEach(stream => {
       streamColors[stream.id] = stream.colour;
+      streamNames[stream.id] = stream.name; // Save the friendly name
     });
     
     // Create a checkbox for each stream
@@ -128,6 +130,9 @@ function updateChart() {
   }
   
   const allFiltered = Object.values(filteredData).flat();
+    // Always update the legend regardless of data availability
+  updateLegend();
+  // Only proceed with chart update if we have data
   if (allFiltered.length === 0) return;
   
   const minDate = d3.min(allFiltered, d => d.date);
@@ -183,7 +188,7 @@ function updateLegend() {
     legendItem.append("text")
       .attr("x", 15)
       .attr("y", 9)
-      .text(stream);
+      .text(streamNames[stream]);
   });
 }
 
