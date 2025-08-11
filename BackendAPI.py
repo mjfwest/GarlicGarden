@@ -11,7 +11,7 @@ import random
 from datetime import datetime, timedelta
 import threading
 import psutil
-
+import requests
 
 """
 GarlicGarden Backend API
@@ -20,6 +20,8 @@ A Flask-SocketIO application that collects, stores, and distributes various sens
 Uses Redis for data storage and pub/sub messaging to enable real-time data streaming to clients.
 Provides HTTP endpoints for data access and IoT device integration.
 """
+
+MAX_DATA_AGE = 3600  # Max age of data points to store per stream
 
 # Connect to Redis server for data storage and pub/sub
 redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
@@ -44,7 +46,7 @@ socketio = SocketIO(
 
 # Global variables for pump state
 pump_state = {"pump": False}
-max_data_points = 100
+
 
 # Lists to track registered data streams
 registered_streams = []
@@ -155,46 +157,37 @@ def cpu_usage_publisher():
             usage = psutil.cpu_percent(interval=1)
             data_point = {"value": usage, "date": time.time()}
             key = "cpu_usage_data"
-            stored_data = redis_client.get(key)
-            usage_data = json.loads(stored_data) if stored_data else []
-            usage_data.append(data_point)
-            redis_client.set(key, json.dumps(usage_data))
-            redis_client.publish("cpu_usage_channel", json.dumps(data_point))
+            # use the sensor endpoint to store the data
+            url = f"http://localhost:5555/publish/cpu_usage"
+            response = requests.post(url, json=data_point)
+            response.raise_for_status()  # Raise an error for bad responses
+
         except Exception as e:
             print(f"Error publishing CPU usage: {e}")
         time.sleep(4)  # 1s for cpu_percent + 4s = 5s total
 
 
-def cpu_temp_publisher():
-    """
-    Publish CPU temperature every 5 seconds.
+# def cpu_temp_publisher():
+#     """
+#     Publish CPU temperature every 5 seconds.
 
-    Collects CPU temperature data, stores it in Redis,
-    and publishes it to the cpu_temp_channel for real-time updates.
-    This function runs in an infinite loop in a separate thread.
-    """
-    while True:
-        try:
-            # Get CPU temperature
-            temp = get_cpu_temperature()
+#     Collects CPU temperature data, stores it in Redis,
+#     and publishes it to the cpu_temp_channel for real-time updates.
+#     This function runs in an infinite loop in a separate thread.
+#     """
+#     while True:
+#         try:
+#             # Get CPU temperature
+#             temp = get_cpu_temperature()
 
-            # Create data point
-            data_point = {"value": temp, "date": time.time()}
+#             # Create data point
+#             data_point = {"value": temp, "date": time.time()}
 
-            # Store in Redis
-            key = "cpu_temp_data"
-            stored_data = redis_client.get(key)
-            temp_data = json.loads(stored_data) if stored_data else []
-            temp_data.append(data_point)
-            redis_client.set(key, json.dumps(temp_data))
+#         except Exception as e:
+#             print(f"Error publishing CPU temp: {e}")
 
-            # Publish to channel
-            redis_client.publish("cpu_temp_channel", json.dumps(data_point))
-        except Exception as e:
-            print(f"Error publishing CPU temp: {e}")
-
-        # Wait 5 seconds
-        time.sleep(5)
+#         # Wait 5 seconds
+#         time.sleep(5)
 
 
 @socketio.on("subscribe")
@@ -295,6 +288,10 @@ def publish_data(stream):
         key = f"{stream}_data"
         redis_client.zadd(key, {json.dumps(data): data["date"]})
 
+        # Remove data older than 1 hour (3600 seconds)
+        long_ago = time.time() - MAX_DATA_AGE
+
+        redis_client.zremrangebyscore(key, "-inf", long_ago)
         # Publish to channel
         redis_client.publish(f"{stream}_channel", json.dumps(data))
 
@@ -356,17 +353,18 @@ def simulate_data():
 
     # Store and publish humidity
     redis_client.publish("humidity_channel", json.dumps(humidity))
-    h_data = redis_client.get("humidity_data")
-    h_list = json.loads(h_data) if h_data else []
-    h_list.append(humidity)
-    redis_client.set("humidity_data", json.dumps(h_list))
-
-    # Store and publish temperature
     redis_client.publish("temperature_channel", json.dumps(temperature))
-    t_data = redis_client.get("temperature_data")
-    t_list = json.loads(t_data) if t_data else []
-    t_list.append(temperature)
-    redis_client.set("temperature_data", json.dumps(t_list))
+    # Store in Redis
+    for stream, data in [("humidity", humidity), ("temperature", temperature)]:
+        key = f"{stream}_data"
+        redis_client.zadd(key, {json.dumps(data): data["date"]})
+
+        # Remove data older than 1 hour (3600 seconds)
+        long_ago = time.time() - MAX_DATA_AGE
+
+        redis_client.zremrangebyscore(key, "-inf", long_ago)
+        # Publish to channel
+        redis_client.publish(f"{stream}_channel", json.dumps(data))
 
     return jsonify(
         {
@@ -388,20 +386,20 @@ def index():
     return app.send_static_file("index.html")
 
 
-@app.route("/sensor", methods=["POST"])
-def receive_sensor():
-    """
-    Receive sensor data from an IoT device.
+# @app.route("/sensor", methods=["POST"])
+# def receive_sensor():
+#     """
+#     Receive sensor data from an IoT device.
 
-    Request body:
-        JSON object with 'moisture' field
+#     Request body:
+#         JSON object with 'moisture' field
 
-    Returns:
-        JSON response: Status confirmation
-    """
-    data = request.json
-    sensor_data["moisture"] = data["moisture"]
-    return jsonify({"status": "ok"})
+#     Returns:
+#         JSON response: Status confirmation
+#     """
+#     data = request.json
+#     sensor_data["moisture"] = data["moisture"]
+#     return jsonify({"status": "ok"})
 
 
 @app.route("/status", methods=["GET"])
