@@ -37,6 +37,64 @@ pump_state = {"pump": False}
 max_data_points = 100
 
 
+registered_streams = []
+registered_names=[]
+
+class Stream:
+    def __init__(self, channel, id, name, colour):
+        self.channel = channel
+        self.id = id
+        self.name = self.name = name
+        self.colour = colour
+        registered_streams.append(self)
+        registered_names.append(id)
+
+    def listener(self):
+        pubsub = redis_client.pubsub()
+        pubsub.subscribe(self.channel)
+        for message in pubsub.listen():
+            if message["type"] == "message":
+                new_point = json.loads(message["data"])
+                socketio.emit(self.id, new_point, room=self.id)
+
+# cpu_temp
+# cpu_usage
+# humidity
+# temperature
+# moisture
+
+Stream(
+    channel="cpu_temp_channel",
+    id="cpu_temp",
+    name="CPU temperature",
+    colour="FF0000"
+)
+Stream(
+    channel="cpu_usage_channel",
+    id="cpu_usage",
+    name="CPU usage",
+    colour="00FF00"
+)
+Stream(
+    channel="humidity_channel",
+    id="humidity",
+    name="Humidity",
+    colour="0000FF"
+)
+Stream(
+    channel="temperature_channel",
+    id="temperature",
+    name="Temperature",
+    colour="FFFF00"
+)
+Stream(
+    channel="moisture_channel",
+    id="moisture",
+    name="Moisture",
+    colour="00FFFF"
+)
+
+
 def get_cpu_temperature():
     """Read CPU temperature on Linux systems"""
     try:
@@ -101,48 +159,11 @@ def cpu_temp_publisher():
         time.sleep(5)
 
 
-def cpu_usage_pubsub_listener():
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe("cpu_usage_channel")
-    for message in pubsub.listen():
-        if message["type"] == "message":
-            new_point = json.loads(message["data"])
-            socketio.emit("cpu_usage", new_point, room="cpu_usage")
-
-
-def cpu_temp_pubsub_listener():
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe("cpu_temp_channel")
-    for message in pubsub.listen():
-        if message["type"] == "message":
-            new_point = json.loads(message["data"])
-            socketio.emit("cpu_temp", new_point, room="cpu_temp")
-
-
-def humidity_pubsub_listener():
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe("humidity_channel")
-    for message in pubsub.listen():
-        if message["type"] == "message":
-            new_point = json.loads(message["data"])
-            # Emit to all Socket.IO clients in the "humidity" room
-            socketio.emit("humidity", new_point, room="humidity")
-
-
-def temperature_pubsub_listener():
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe("temperature_channel")
-    for message in pubsub.listen():
-        if message["type"] == "message":
-            new_point = json.loads(message["data"])
-            # Emit to all Socket.IO clients in the "humidity" room
-            socketio.emit("temperature", new_point, room="temperature")
-
 
 @socketio.on("subscribe")
 def handle_subscribe(data):
     stream = data.get("stream")
-    if stream in ("humidity", "temperature", "cpu_usage"):
+    if stream in registered_streams:
         join_room(stream)
         # Send the last N points immediately from Redis
         key = f"{stream}_data"
@@ -158,7 +179,7 @@ def handle_subscribe(data):
 @socketio.on("unsubscribe")
 def handle_unsubscribe(data):
     stream = data.get("stream")
-    if stream in ("humidity", "temperature", "cpu_usage"):
+    if stream in registered_streams:
         leave_room(stream)
 
 
@@ -166,19 +187,16 @@ def handle_unsubscribe(data):
 @app.route("/streams", methods=["GET"])
 def get_streams():
     # Define available streams with friendly names and colors
-    available_streams = [
-        {"id": "humidity", "name": "Humidity", "color": "#1f77b4"},
-        {"id": "temperature", "name": "Temperature", "color": "#ff8c00"},
-        # {"id": "cpu_temp", "name": "CPU Temperature", "color": "#2ca02c"},
-        {"id": "cpu_usage", "name": "CPU Usage (%)", "color": "#d62728"},
-    ]
+    available_streams = []
+    for stream in registered_streams:
+        available_streams.append({"id" : stream.id, "name": stream.name, "colour": stream.colour})
     return jsonify(available_streams)
 
 
 # publish endpoints for IoT devices
 @app.route("/publish/<stream>", methods=["POST"])
 def publish_data(stream):
-    if stream not in ["humidity", "temperature"]:
+    if stream not in registered_names:
         return jsonify({"error": "Invalid stream"}), 400
 
     try:
@@ -228,6 +246,7 @@ def simulate_data():
 
     humidity = {"value": random.randint(0, 50), "date": time.time()}
     temperature = {"value": random.randint(50, 100), "date": time.time()}
+
 
     # Store and publish humidity
     redis_client.publish("humidity_channel", json.dumps(humidity))
@@ -293,12 +312,11 @@ def button():
 
 
 if __name__ == "__main__":
-    # Start the background task using SocketIO's helper
-    threading.Thread(target=humidity_pubsub_listener, daemon=True).start()
-    threading.Thread(target=temperature_pubsub_listener, daemon=True).start()
-    threading.Thread(target=cpu_temp_pubsub_listener, daemon=True).start()
+    for stream in registered_streams:
+        threading.Thread(target=stream.listener,daemon=True).start()
+
     # Start CPU temperature publisher
-    threading.Thread(target=cpu_usage_pubsub_listener, daemon=True).start()
+    # threading.Thread(target=cpu_usage_pubsub_listener, daemon=True).start()
     threading.Thread(target=cpu_usage_publisher, daemon=True).start()
 
     # Run the SocketIO app instead of the Flask app
